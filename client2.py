@@ -1,43 +1,59 @@
-import socket
-import pickle
+# client.py
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import time
+import numpy as np
+import socket
+import pickle
+import io
+from model import SimpleNet
 
-# Define the same simple model for training
-class SimpleModel(nn.Module):
-    def __init__(self):
-        super(SimpleModel, self).__init__()
-        self.fc1 = nn.Linear(10, 50)
-        self.fc2 = nn.Linear(50, 2)
+def train_local():
+    model = SimpleNet()
+    optimizer = optim.SGD(model.parameters(), lr=0.01)
+    criterion = nn.CrossEntropyLoss()
 
-    def forward(self, x):
-        x = torch.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
+    x = torch.tensor(np.random.rand(16, 10), dtype=torch.float32)
+    y = torch.tensor(np.random.randint(0, 2, size=(16,)), dtype=torch.long)
+    print("Training local model...")
+    for i in range(3*10000):  # local epochs
+        if i % 10000 == 0:
+            print(f"Local training step {i}")
+        optimizer.zero_grad()
+        out = model(x)
+        loss = criterion(out, y)
+        loss.backward()
+        optimizer.step()
 
-# Client to receive work from the server and train the model
-def client():
-    # Connect to the server
-    host = 'localhost'
-    port = 65432
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.connect((host, port))
+    buffer = io.BytesIO()
+    torch.save(model.state_dict(), buffer)
+    buffer.seek(0)
+    return buffer.read()
 
-        # Define the hyperparameters for the model
-        config = {
-            'lr': 0.01,
-            'epochs': 5
-        }
+def send_update(host='127.0.0.1', port=5001):
+    model_bytes = train_local()
+    print("work done!")
+    #print(model_bytes)
+    payload = {"state": model_bytes}
 
-        # Send the configuration to the server
-        data = pickle.dumps(config)
-        s.sendall(data)
-        time.sleep(10)
-        # Receive the training results from the server (optional)
-        data = s.recv(1024)
-        print("Received results from server:", data)
+    s = socket.socket()
+    s.settimeout(3.0)
+    s.connect((host, port))
+    s.sendall(pickle.dumps(payload))
+    response = b""
+    try:
+        print("[CLIENT] Model sent to server.")
+        response = pickle.loads(s.recv(1024))
+        #if not response:
+        #    break
+
+    except socket.timeout:
+        print("Socket recv timed out and finished. FIX this in the server code.")
+    if not response:
+        print("[CLIENT] Received no response from server.")
+    else:
+        print("[CLIENT] Server response:", response)
+    s.close()
 
 if __name__ == "__main__":
-    client()
+    send_update()

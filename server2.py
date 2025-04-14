@@ -1,75 +1,56 @@
+# server.py
 import socket
-import ray
 import pickle
-from ray import tune
-import torch
-import torch.nn as nn
-import torch.optim as optim
+import ray
+import io
+from aggregator import Aggregator
+import threading
 import time
-# Define a simple neural network for training
-class SimpleModel(nn.Module):
-    def __init__(self):
-        super(SimpleModel, self).__init__()
-        self.fc1 = nn.Linear(10, 50)
-        self.fc2 = nn.Linear(50, 2)
+import sys
 
-    def forward(self, x):
-        #time.sleep(1) # Simulate some training time
-        x = torch.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
+ray.init()
+aggregator = Aggregator.remote()
 
-# Server to handle client connections and distribute tasks
-def server():
-    # Initialize Ray
-    ray.init(ignore_reinit_error=True)
+def print_while_waiting():
+    while not data_received:
+        print("Waiting for data...", flush=True)
+        time.sleep(10)
 
-    # Define the server address and port
-    host = 'localhost'
-    port = 65432
+data_received = False
 
-    # Create a TCP/IP socket for communication
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind((host, port))
-        s.listen()
+def start_server(host='127.0.0.1', port=5001):
+    s = socket.socket()
+    s.bind((host, port))
+    s.listen(5)
+    print(f"[SERVER] Listening on {host}:{port}")
 
-        print("Server is listening for clients...")
-
-        # Accept client connections and distribute work
+    # Start thread
+    thread = threading.Thread(target=print_while_waiting)
+    thread.start()
+    data_received = False
+    while True:
         conn, addr = s.accept()
-        with conn:
-            print(f"Connected to {addr}")
-            # Receive the training configuration (hyperparameters) from the client
-            data = conn.recv(1024)
-            config = pickle.loads(data)
+        print(f"[SERVER] Connection from {addr}")
+        data = b""
+        while True:
+            chunk = conn.recv(4096)
+            print("Downloading data...")
+            if not chunk:
+                break
+            data += chunk
+        print("Download complete.")
+        print("data size: " + str(sys.getsizeof(data)))
+        data_received = True
 
-            # Use Ray to parallelize the task across multiple clients
-            result = ray.remote(train_model).remote(config)
-            print("Waiting for clients to finish training...")
-            results = ray.get(result)
-            print("Results from clients:", results)
+        model_state = pickle.loads(data)
+        buffer = io.BytesIO(model_state["state"])
+        aggregator.receive_update.remote(buffer)
 
-# Remote function to handle model training (distributed via Ray)
-@ray.remote
-def train_model(config):
-    # Create a simple model and train it with the provided config
-    model = SimpleModel()
-    optimizer = optim.SGD(model.parameters(), lr=config['lr'])
-    loss_fn = nn.CrossEntropyLoss()
-
-    # Generate random data for training
-    X = torch.randn(100, 10)
-    y = torch.randint(0, 2, (100,))
-
-    for epoch in range(config['epochs']):
-        optimizer.zero_grad()
-        output = model(X)
-        loss = loss_fn(output, y)
-        loss.backward()
-        optimizer.step()
-
-    accuracy = (output.argmax(dim=1) == y).float().mean().item()
-    return accuracy, loss.item()
+        conn.send(pickle.dumps({"status": "received"}))
+        conn.close()
+        
+        # Wait for thread to finish
+        thread.join()
 
 if __name__ == "__main__":
-    server()
+    start_server()
